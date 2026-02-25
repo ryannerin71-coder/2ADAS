@@ -1,5 +1,5 @@
-# Use Python 3.10 which is highly stable for pandas-ta
-FROM python:3.10-slim
+# Upgrade to Python 3.12 to satisfy pandas-ta requirements
+FROM python:3.12-slim
 
 # Set the working directory
 WORKDIR /app
