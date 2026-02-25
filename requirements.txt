@@ -1,7 +1,7 @@
-requests==2.31.0
-pandas==2.2.1
-numpy==1.26.4
-pandas-ta==0.3.14b0
-APScheduler==3.10.4
-python-telegram-bot==20.8
-python-dotenv==1.0.1
+requests
+pandas
+numpy
+pandas-ta
+APScheduler
+python-telegram-bot
+python-dotenv
