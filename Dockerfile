@@ -1,5 +1,5 @@
-# Use official lightweight Python image
-FROM python:3.11-slim
+# Use Python 3.10 which is highly stable for pandas-ta
+FROM python:3.10-slim
 
 # Set the working directory
 WORKDIR /app
