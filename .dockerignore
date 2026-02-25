@@ -1,0 +1,8 @@
+.env
+trading_bot.db
+.git
+.gitignore
+__pycache__/
+*.py[cod]
+README.md
+Dockerfile
