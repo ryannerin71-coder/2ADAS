@@ -1,0 +1,16 @@
+# Environments
+.env
+.venv/
+venv/
+env/
+
+# Database
+trading_bot.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS generated files
+.DS_Store
