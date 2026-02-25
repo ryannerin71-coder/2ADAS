@@ -3,6 +3,8 @@ import time
 import sqlite3
 import asyncio
 import requests
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
@@ -106,7 +108,6 @@ def analyze_structure(df):
 def find_ob_and_fvg(df, bias):
     """Approximates the recent institutional zones."""
     latest = df.iloc[-1]
-    prev = df.iloc[-2]
     
     ob_valid = True
     fvg_inside_ob = False
@@ -138,8 +139,8 @@ def calc_technical_data(df, bias, swing_h, swing_l):
     
     latest = df.iloc[-1]
     
-    fib_aligned = True # Placeholder for deep retracement logic
-    sweep_detected = True # Placeholder for equal high/low logic
+    fib_aligned = True 
+    sweep_detected = True 
     
     macd_hist = latest['MACDh_12_26_9']
     macd_confirm = (macd_hist > 0 and bias == "BULLISH") or (macd_hist < 0 and bias == "BEARISH")
@@ -171,8 +172,8 @@ def score_setup(struct, ob_fvg, tech):
     if tech['volume_confirmed']: score += 1
     
     current_hour = datetime.now(timezone.utc).hour
-    if 13 <= current_hour <= 17: score += 1 # London/NY overlap
-    elif 7 <= current_hour <= 10: score += 1 # London open
+    if 13 <= current_hour <= 17: score += 1 
+    elif 7 <= current_hour <= 10: score += 1 
 
     grade = "REJECTED"
     if score >= 16: grade = "PREMIUM"
@@ -262,7 +263,7 @@ async def process_markets():
             except Exception as e:
                 print(f"Telegram Error: {e}")
                 
-        time.sleep(2) # Safe 2-second pacing per pair
+        time.sleep(2) 
 
 async def main():
     print("Initializing AI Quant Bot (1H Edition)...")
@@ -272,10 +273,35 @@ async def main():
     scheduler.add_job(process_markets, 'interval', minutes=15)
     scheduler.start()
     
-    await process_markets() # Force initial run
+    await process_markets() 
     
     while True:
         await asyncio.sleep(1)
 
+# =========================================================================
+# === RENDER PORT BINDING FIX ===
+# =========================================================================
+
+def keep_alive():
+    """Runs a tiny web server to satisfy Render's port scanner."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b"AI Quant Bot is ONLINE and scanning markets.")
+            
+        def log_message(self, format, *args):
+            pass 
+            
+    port = int(os.environ.get('PORT', 8080))
+    server = HTTPServer(('0.0.0.0', port), Handler)
+    print(f"Dummy web server started on port {port} for Render.")
+    server.serve_forever()
+
 if __name__ == "__main__":
+    # Start the dummy web server in the background
+    threading.Thread(target=keep_alive, daemon=True).start()
+    
+    # Start your actual trading bot
     asyncio.run(main())
