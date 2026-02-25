@@ -182,29 +182,23 @@ def score_setup(struct, ob_fvg, tech):
     return {"total_score": score, "grade": grade}
 
 # =========================================================================
-# === MODULE 11: DYNAMIC SENTENCE GENERATOR ===
+# === MODULE 11: DYNAMIC SENTENCE GENERATOR (SIMPLIFIED) ===
 # =========================================================================
 
 def generate_analysis_text(bias, ob_fvg, tech):
-    """Dynamically builds the analysis string based on true confluence factors."""
-    # 1. Define the entry zone
-    zone_desc = "an institutional OB containing an FVG" if ob_fvg['fvg_inside_ob'] else "a clean 1H Order Block"
+    """Dynamically builds a simple, easy-to-read analysis string."""
+    trend = "Uptrend" if bias == "BULLISH" else "Downtrend"
+    zone_action = "finding strong support" if bias == "BULLISH" else "hitting heavy resistance"
     
-    # 2. Define the catalysts
-    catalyst = []
-    if tech['sweep_detected']: catalyst.append("a liquidity sweep")
-    if tech['fib_aligned']: catalyst.append("a key Fib retracement")
-    catalyst_str = f"following {' and '.join(catalyst)}" if catalyst else "after structural alignment"
+    # Gather only the indicators that are actively confirming the trade
+    confirmations = []
+    if tech['rsi_divergence']: confirmations.append("RSI")
+    if tech['macd_confirm']: confirmations.append("MACD")
+    if tech['volume_confirmed']: confirmations.append("Volume")
     
-    # 3. Define the momentum indicators
-    momentum = []
-    if tech['rsi_divergence']: momentum.append("RSI divergence")
-    if tech['macd_confirm']: momentum.append("MACD confirmation")
-    if tech['volume_confirmed']: momentum.append("a volume spike")
-    mom_str = f"backed by {', '.join(momentum)}" if momentum else "with steady price action"
+    ind_text = f" ({', '.join(confirmations)} confirming)" if confirmations else ""
     
-    # Combine into a professional sentence
-    return f"Price tapped into {zone_desc} {catalyst_str}. The trend is strictly {bias}, {mom_str} — anticipating a move toward TP targets."
+    return f"Overall 1H {trend}. Price is {zone_action}{ind_text}. Setup is clean, expecting a push to targets."
 
 # =========================================================================
 # === MODULE 12: TELEGRAM FORMATTER ===
@@ -272,7 +266,7 @@ async def process_markets():
                 time.sleep(2)
                 continue 
 
-            # GENERATE DYNAMIC ANALYSIS TEXT
+            # GENERATE SIMPLE ANALYSIS TEXT
             dynamic_analysis = generate_analysis_text(struct['bias'], ob_fvg, tech)
 
             signal_data = {
@@ -280,7 +274,7 @@ async def process_markets():
                 "current_price": current_price, "entry": entry_mid, "sl": sl,
                 "tp1": tp1, "tp2": tp2, "tp3": tp3, "score": scoring['total_score'], 
                 "grade": scoring['grade'],
-                "analysis": dynamic_analysis # Now fully dynamic!
+                "analysis": dynamic_analysis 
             }
 
             msg = format_telegram_message(signal_data)
