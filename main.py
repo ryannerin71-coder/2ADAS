@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 # --- Charting Imports ---
 import io
 import matplotlib
-matplotlib.use('Agg') # Crucial for server environments like Render
+matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import mplfinance as mpf
 
@@ -36,7 +36,7 @@ TIMEFRAME = "1h"
 bot = Bot(token=TELEGRAM_TOKEN)
 
 # =========================================================================
-# === MODULE 14: DATABASE LOGGER ===
+# === MODULE 14: DATABASE LOGGER (Duplicate Guard Only) ===
 # =========================================================================
 
 def init_db():
@@ -44,22 +44,15 @@ def init_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS signals (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pair TEXT, direction TEXT, entry REAL, sl REAL, 
-                    tp1 REAL, tp2 REAL, tp3 REAL, score INTEGER, 
-                    grade TEXT, analysis_text TEXT, timestamp_sent DATETIME, 
-                    outcome TEXT, outcome_timestamp DATETIME, pips_result REAL)''')
+                    pair TEXT, timestamp_sent DATETIME)''')
     conn.commit()
     conn.close()
 
-def log_signal(data):
+def log_signal(pair):
     conn = sqlite3.connect('trading_bot.db')
     c = conn.cursor()
-    c.execute('''INSERT INTO signals 
-                 (pair, direction, entry, sl, tp1, tp2, tp3, score, grade, analysis_text, timestamp_sent, outcome) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', 
-              (data['pair'], data['direction'], data['entry'], data['sl'], data['tp1'], 
-               data['tp2'], data['tp3'], data['score'], data['grade'], data['analysis'], 
-               datetime.now(timezone.utc), "OPEN"))
+    c.execute('''INSERT INTO signals (pair, timestamp_sent) 
+                 VALUES (?, ?)''', (pair, datetime.now(timezone.utc)))
     conn.commit()
     conn.close()
 
@@ -222,10 +215,8 @@ def format_telegram_message(signal):
 # =========================================================================
 
 def generate_trade_chart(df, symbol, direction, entry, sl, tp1):
-    """Generates a TradingView style chart with Risk/Reward shaded zones."""
-    plot_df = df.tail(60) # Show the last 60 candles for clarity
+    plot_df = df.tail(60)
 
-    # Custom TradingView-style dark theme
     mc = mpf.make_marketcolors(up='#26a69a', down='#ef5350', edge='inherit', wick='inherit', volume='in')
     s = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc, gridcolor='#2a2a2a', facecolor='#131722', figcolor='#131722')
 
@@ -242,7 +233,6 @@ def generate_trade_chart(df, symbol, direction, entry, sl, tp1):
 
     ax = axes[0]
 
-    # Shade the Risk (Red) and Reward (Green) Zones
     if direction == "BUY":
         ax.axhspan(sl, entry, alpha=0.3, color='#ef5350') 
         ax.axhspan(entry, tp1, alpha=0.3, color='#26a69a') 
@@ -250,92 +240,27 @@ def generate_trade_chart(df, symbol, direction, entry, sl, tp1):
         ax.axhspan(entry, sl, alpha=0.3, color='#ef5350') 
         ax.axhspan(tp1, entry, alpha=0.3, color='#26a69a')
 
-    # Add dashed lines for the exact levels
     ax.axhline(tp1, color='#26a69a', linestyle='--', linewidth=1.5, label="TP1")
     ax.axhline(entry, color='#fbc02d', linestyle='--', linewidth=1.5, label="Entry")
     ax.axhline(sl, color='#ef5350', linestyle='--', linewidth=1.5, label="Stop Loss")
 
-    # Save to memory buffer instead of disk
     buf = io.BytesIO()
     fig.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#131722')
     buf.seek(0)
-    plt.close(fig) # Clean up memory
+    plt.close(fig)
     
     return buf
 
 # =========================================================================
-# === MODULE 15: DAILY PERFORMANCE REPORT ===
-# =========================================================================
-
-async def send_daily_report():
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Generating 24H Performance Report...")
-    conn = sqlite3.connect('trading_bot.db')
-    c = conn.cursor()
-    c.execute("SELECT outcome, pips_result FROM signals WHERE outcome != 'OPEN' AND outcome_timestamp >= datetime('now', '-24 hours')")
-    recent_closed = c.fetchall()
-    conn.close()
-    
-    wins = sum(1 for t in recent_closed if t[0] == 'WIN')
-    losses = sum(1 for t in recent_closed if t[0] == 'LOSS')
-    total_trades = wins + losses
-    net_pips = sum(t[1] for t in recent_closed if t[1] is not None)
-    
-    if total_trades == 0: return
-        
-    win_rate = (wins / total_trades) * 100
-    msg = (
-        f"📅 <b>24-HOUR PERFORMANCE REPORT</b> 📅\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📈 <b>Total Trades Closed:</b> {total_trades}\n"
-        f"✅ <b>Wins (TP Hit):</b> {wins}\n"
-        f"❌ <b>Losses (SL Hit):</b> {losses}\n"
-        f"🏆 <b>Win Rate:</b> {win_rate:.1f}%\n\n"
-        f"💰 <b>Net Result:</b> {net_pips:+.1f} Pips\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Tracked by Nilesh</i>"
-    )
-    
-    try:
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML')
-    except Exception as e: print(f"Daily Report Error: {e}")
-
-# =========================================================================
-# === MODULE 13: ORCHESTRATOR & TRADE MONITOR ===
+# === MODULE 13: ORCHESTRATOR ===
 # =========================================================================
 
 async def process_markets():
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning 1H Markets & Tracking Trades...")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning 1H Markets...")
     for symbol in WATCHLIST:
         df = fetch_data(symbol)
         if df is None or df.empty: continue
         current_price = df['close'].iloc[-1]
-        
-        # --- TRACKING LIVE TRADES ---
-        conn = sqlite3.connect('trading_bot.db')
-        c = conn.cursor()
-        c.execute("SELECT id, direction, entry, sl, tp1 FROM signals WHERE pair=? AND outcome='OPEN'", (symbol,))
-        open_trades = c.fetchall()
-        
-        for trade in open_trades:
-            t_id, direction, entry, sl, tp1 = trade
-            multiplier = 100 if "JPY" in symbol else 10 if "XAU" in symbol else 1 if "BTC" in symbol else 10000
-            closed = False
-            result = ""
-            pips = 0
-            
-            if direction == "BUY":
-                if current_price >= tp1: closed, result, pips = True, "WIN", (tp1 - entry) * multiplier
-                elif current_price <= sl: closed, result, pips = True, "LOSS", (sl - entry) * multiplier
-            else:
-                if current_price <= tp1: closed, result, pips = True, "WIN", (entry - tp1) * multiplier
-                elif current_price >= sl: closed, result, pips = True, "LOSS", (entry - sl) * multiplier
-                    
-            if closed:
-                c.execute("UPDATE signals SET outcome=?, pips_result=?, outcome_timestamp=? WHERE id=?", (result, pips, datetime.now(timezone.utc), t_id))
-                conn.commit()
-                icon = "✅" if result == "WIN" else "❌"
-                close_msg = f"{icon} <b>Trade Closed: {symbol}</b>\nResult: {result} ({pips:+.1f} Pips)\n<i>By Nilesh</i>"
-                await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=close_msg, parse_mode='HTML')
                 
         # --- SCANNING FOR NEW SETUPS ---
         struct = analyze_structure(df)
@@ -355,8 +280,12 @@ async def process_markets():
                 risk = sl - entry_mid
                 tp1, tp2, tp3 = entry_mid - (risk * 1.5), entry_mid - (risk * 2.5), entry_mid - (risk * 4.0)
 
-            c.execute("SELECT * FROM signals WHERE pair=? AND timestamp_sent >= datetime('now', '-4 hours') AND outcome='OPEN'", (symbol,))
+            # Prevent duplicate signals within 4 hours
+            conn = sqlite3.connect('trading_bot.db')
+            c = conn.cursor()
+            c.execute("SELECT * FROM signals WHERE pair=? AND timestamp_sent >= datetime('now', '-4 hours')", (symbol,))
             recent_signal = c.fetchone()
+            conn.close()
             
             if not recent_signal:
                 direction = "BUY" if struct['bias'] == "BULLISH" else "SELL"
@@ -368,23 +297,18 @@ async def process_markets():
                     "score": scoring['total_score'], "grade": scoring['grade'], "analysis": dynamic_analysis 
                 }
 
-                # 1. Format the text
                 msg = format_telegram_message(signal_data)
-                
-                # 2. Generate the visual chart
                 chart_img = generate_trade_chart(df, symbol, direction, entry_mid, sl, tp1)
 
                 try:
-                    # 3. Send photo with text as caption
                     await bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=chart_img, caption=msg, parse_mode='HTML')
-                    log_signal(signal_data)
+                    log_signal(symbol)
                     print(f"--> Signal and Chart broadcasted for {symbol}")
                 except Exception as e:
                     print(f"Telegram Error: {e}")
                 finally:
-                    chart_img.close() # Always close the buffer to free memory
+                    chart_img.close() 
                     
-        conn.close()
         time.sleep(2) 
 
 async def main():
@@ -392,7 +316,6 @@ async def main():
     init_db()
     scheduler = AsyncIOScheduler()
     scheduler.add_job(process_markets, 'interval', minutes=15)
-    scheduler.add_job(send_daily_report, 'interval', hours=24)
     scheduler.start()
     await process_markets() 
     while True:
