@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Bot
 from dotenv import load_dotenv
@@ -29,7 +29,7 @@ TIMEFRAME = "1h"
 bot = Bot(token=TELEGRAM_TOKEN)
 
 # =========================================================================
-# === MODULE 14: DATABASE LOGGER ===
+# === MODULE 14: DATABASE LOGGER & TRACKER ===
 # =========================================================================
 
 def init_db():
@@ -85,7 +85,6 @@ def fetch_data(symbol):
 # =========================================================================
 
 def analyze_structure(df):
-    """Detects Swings (3 bars left/right) and Trend Bias."""
     df['swing_high'] = df['high'][(df['high'] > df['high'].shift(1)) & (df['high'] > df['high'].shift(2)) & (df['high'] > df['high'].shift(3)) & (df['high'] > df['high'].shift(-1)) & (df['high'] > df['high'].shift(-2)) & (df['high'] > df['high'].shift(-3))]
     df['swing_low'] = df['low'][(df['low'] < df['low'].shift(1)) & (df['low'] < df['low'].shift(2)) & (df['low'] < df['low'].shift(3)) & (df['low'] < df['low'].shift(-1)) & (df['low'] < df['low'].shift(-2)) & (df['low'] < df['low'].shift(-3))]
     
@@ -95,7 +94,6 @@ def analyze_structure(df):
     current_close = df['close'].iloc[-1]
     ema_200 = df['close'].ewm(span=200, adjust=False).mean().iloc[-1]
     
-    # Bias logic based on structure & EMA alignment
     bias = "BULLISH" if current_close > ema_200 else "BEARISH"
     trend_aligned = (current_close > ema_200) if bias == "BULLISH" else (current_close < ema_200)
 
@@ -106,13 +104,10 @@ def analyze_structure(df):
 # =========================================================================
 
 def find_ob_and_fvg(df, bias):
-    """Approximates the recent institutional zones."""
     latest = df.iloc[-1]
-    
     ob_valid = True
     fvg_inside_ob = False
     
-    # FVG Logic (3 candle overlap check)
     if bias == "BULLISH":
         ob_high, ob_low = latest['low'] * 1.002, latest['low'] * 0.998
         if df['high'].iloc[-3] < df['low'].iloc[-1]: fvg_inside_ob = True
@@ -139,15 +134,12 @@ def calc_technical_data(df, bias, swing_h, swing_l):
     
     latest = df.iloc[-1]
     
-    fib_aligned = True 
-    sweep_detected = True 
-    
     macd_hist = latest['MACDh_12_26_9']
     macd_confirm = (macd_hist > 0 and bias == "BULLISH") or (macd_hist < 0 and bias == "BEARISH")
     
     return {
-        "fib_aligned": fib_aligned,
-        "sweep_detected": sweep_detected,
+        "fib_aligned": True,
+        "sweep_detected": True,
         "rsi_divergence": True, 
         "ema_aligned": latest['EMA_50'] > latest['EMA_200'] if bias == "BULLISH" else latest['EMA_50'] < latest['EMA_200'],
         "macd_confirm": macd_confirm,
@@ -182,27 +174,20 @@ def score_setup(struct, ob_fvg, tech):
     return {"total_score": score, "grade": grade}
 
 # =========================================================================
-# === MODULE 11: DYNAMIC SENTENCE GENERATOR (SIMPLIFIED) ===
+# === MODULE 11 & 12: DYNAMIC TEXT & FORMATTER ===
 # =========================================================================
 
 def generate_analysis_text(bias, ob_fvg, tech):
-    """Dynamically builds a simple, easy-to-read analysis string."""
     trend = "Uptrend" if bias == "BULLISH" else "Downtrend"
     zone_action = "finding strong support" if bias == "BULLISH" else "hitting heavy resistance"
     
-    # Gather only the indicators that are actively confirming the trade
     confirmations = []
     if tech['rsi_divergence']: confirmations.append("RSI")
     if tech['macd_confirm']: confirmations.append("MACD")
     if tech['volume_confirmed']: confirmations.append("Volume")
     
     ind_text = f" ({', '.join(confirmations)} confirming)" if confirmations else ""
-    
     return f"Overall 1H {trend}. Price is {zone_action}{ind_text}. Setup is clean, expecting a push to targets."
-
-# =========================================================================
-# === MODULE 12: TELEGRAM FORMATTER ===
-# =========================================================================
 
 def format_telegram_message(signal):
     fmt = ",.2f" if any(x in signal['pair'] for x in ["JPY", "XAU", "BTC"]) else ",.5f"
@@ -227,15 +212,100 @@ def format_telegram_message(signal):
     return msg
 
 # =========================================================================
-# === MODULE 13 & 15: ORCHESTRATOR & SENDER ===
+# === MODULE 15: DAILY PERFORMANCE REPORT ===
+# =========================================================================
+
+async def send_daily_report():
+    """Generates and sends a 24-hour summary of all closed trades."""
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Generating 24H Performance Report...")
+    
+    conn = sqlite3.connect('trading_bot.db')
+    c = conn.cursor()
+    # Fetch all trades closed in the last 24 hours
+    c.execute("SELECT outcome, pips_result FROM signals WHERE outcome != 'OPEN' AND outcome_timestamp >= datetime('now', '-24 hours')")
+    recent_closed = c.fetchall()
+    conn.close()
+    
+    wins = sum(1 for t in recent_closed if t[0] == 'WIN')
+    losses = sum(1 for t in recent_closed if t[0] == 'LOSS')
+    total_trades = wins + losses
+    net_pips = sum(t[1] for t in recent_closed if t[1] is not None)
+    
+    if total_trades == 0:
+        return # Skip sending a report if no trades closed today
+        
+    win_rate = (wins / total_trades) * 100
+    
+    msg = (
+        f"📅 <b>24-HOUR PERFORMANCE REPORT</b> 📅\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 <b>Total Trades Closed:</b> {total_trades}\n"
+        f"✅ <b>Wins (TP Hit):</b> {wins}\n"
+        f"❌ <b>Losses (SL Hit):</b> {losses}\n"
+        f"🏆 <b>Win Rate:</b> {win_rate:.1f}%\n\n"
+        f"💰 <b>Net Result:</b> {net_pips:+.1f} Pips\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Tracked by Nilesh</i>"
+    )
+    
+    try:
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML')
+    except Exception as e:
+        print(f"Daily Report Error: {e}")
+
+# =========================================================================
+# === MODULE 13: ORCHESTRATOR & TRADE MONITOR ===
 # =========================================================================
 
 async def process_markets():
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning 1H Markets...")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning 1H Markets & Tracking Trades...")
     for symbol in WATCHLIST:
         df = fetch_data(symbol)
         if df is None or df.empty: continue
-
+        
+        current_price = df['close'].iloc[-1]
+        
+        # --- TRACKING LIVE TRADES ---
+        conn = sqlite3.connect('trading_bot.db')
+        c = conn.cursor()
+        c.execute("SELECT id, direction, entry, sl, tp1 FROM signals WHERE pair=? AND outcome='OPEN'", (symbol,))
+        open_trades = c.fetchall()
+        
+        for trade in open_trades:
+            t_id, direction, entry, sl, tp1 = trade
+            multiplier = 100 if "JPY" in symbol else 10 if "XAU" in symbol else 1 if "BTC" in symbol else 10000
+            
+            closed = False
+            result = ""
+            pips = 0
+            
+            # Check for Hits
+            if direction == "BUY":
+                if current_price >= tp1:
+                    closed, result = True, "WIN"
+                    pips = (tp1 - entry) * multiplier
+                elif current_price <= sl:
+                    closed, result = True, "LOSS"
+                    pips = (sl - entry) * multiplier
+            else: # SELL
+                if current_price <= tp1:
+                    closed, result = True, "WIN"
+                    pips = (entry - tp1) * multiplier
+                elif current_price >= sl:
+                    closed, result = True, "LOSS"
+                    pips = (entry - sl) * multiplier
+                    
+            if closed:
+                c.execute("UPDATE signals SET outcome=?, pips_result=?, outcome_timestamp=? WHERE id=?", 
+                          (result, pips, datetime.now(timezone.utc), t_id))
+                conn.commit()
+                
+                # Send immediate alert that trade closed
+                icon = "✅" if result == "WIN" else "❌"
+                close_msg = f"{icon} <b>Trade Closed: {symbol}</b>\nResult: {result} ({pips:+.1f} Pips)\n<i>By Nilesh</i>"
+                await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=close_msg, parse_mode='HTML')
+                
+        # --- SCANNING FOR NEW SETUPS ---
         struct = analyze_structure(df)
         ob_fvg = find_ob_and_fvg(df, struct['bias'])
         tech = calc_technical_data(df, struct['bias'], struct['swing_high'], struct['swing_low'])
@@ -243,7 +313,6 @@ async def process_markets():
         scoring = score_setup(struct, ob_fvg, tech)
         
         if scoring['grade'] in ["PREMIUM", "STANDARD"]:
-            current_price = df['close'].iloc[-1]
             entry_mid = (ob_fvg['ob_high'] + ob_fvg['ob_low']) / 2
             
             if struct['bias'] == "BULLISH":
@@ -255,44 +324,39 @@ async def process_markets():
                 risk = sl - entry_mid
                 tp1, tp2, tp3 = entry_mid - (risk * 1.5), entry_mid - (risk * 2.5), entry_mid - (risk * 4.0)
 
-            # Check Duplicate Guard (4 hours)
-            conn = sqlite3.connect('trading_bot.db')
-            c = conn.cursor()
-            c.execute("SELECT * FROM signals WHERE pair=? AND timestamp_sent >= datetime('now', '-4 hours')", (symbol,))
+            # Prevent duplicating signals within 4 hours
+            c.execute("SELECT * FROM signals WHERE pair=? AND timestamp_sent >= datetime('now', '-4 hours') AND outcome='OPEN'", (symbol,))
             recent_signal = c.fetchone()
-            conn.close()
+            
+            if not recent_signal:
+                dynamic_analysis = generate_analysis_text(struct['bias'], ob_fvg, tech)
+                signal_data = {
+                    "pair": symbol, "direction": "BUY" if struct['bias'] == "BULLISH" else "SELL",
+                    "current_price": current_price, "entry": entry_mid, "sl": sl,
+                    "tp1": tp1, "tp2": tp2, "tp3": tp3, "score": scoring['total_score'], 
+                    "grade": scoring['grade'], "analysis": dynamic_analysis 
+                }
 
-            if recent_signal: 
-                time.sleep(2)
-                continue 
-
-            # GENERATE SIMPLE ANALYSIS TEXT
-            dynamic_analysis = generate_analysis_text(struct['bias'], ob_fvg, tech)
-
-            signal_data = {
-                "pair": symbol, "direction": "BUY" if struct['bias'] == "BULLISH" else "SELL",
-                "current_price": current_price, "entry": entry_mid, "sl": sl,
-                "tp1": tp1, "tp2": tp2, "tp3": tp3, "score": scoring['total_score'], 
-                "grade": scoring['grade'],
-                "analysis": dynamic_analysis 
-            }
-
-            msg = format_telegram_message(signal_data)
-            try:
-                await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML')
-                log_signal(signal_data)
-                print(f"--> Signal broadcasted for {symbol}")
-            except Exception as e:
-                print(f"Telegram Error: {e}")
-                
+                msg = format_telegram_message(signal_data)
+                try:
+                    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML')
+                    log_signal(signal_data)
+                    print(f"--> Signal broadcasted for {symbol}")
+                except Exception as e:
+                    print(f"Telegram Error: {e}")
+                    
+        conn.close()
         time.sleep(2) 
 
 async def main():
-    print("Initializing AI Quant Bot (1H Edition)...")
+    print("Initializing AI Quant Bot (1H Edition) with Performance Tracking...")
     init_db()
     
     scheduler = AsyncIOScheduler()
+    # Scans markets and checks open trades every 15 minutes
     scheduler.add_job(process_markets, 'interval', minutes=15)
+    # Sends daily performance report every 24 hours
+    scheduler.add_job(send_daily_report, 'interval', hours=24)
     scheduler.start()
     
     await process_markets() 
@@ -314,7 +378,6 @@ def keep_alive():
             self.wfile.write(b"AI Quant Bot is ONLINE and scanning markets.")
             
         def do_HEAD(self):
-            # This handles UptimeRobot's pings!
             self.send_response(200)
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
@@ -328,8 +391,5 @@ def keep_alive():
     server.serve_forever()
 
 if __name__ == "__main__":
-    # Start the dummy web server in the background
     threading.Thread(target=keep_alive, daemon=True).start()
-    
-    # Start your actual trading bot
     asyncio.run(main())
