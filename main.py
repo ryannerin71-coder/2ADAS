@@ -8,10 +8,17 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Bot
 from dotenv import load_dotenv
+
+# --- Charting Imports ---
+import io
+import matplotlib
+matplotlib.use('Agg') # Crucial for server environments like Render
+import matplotlib.pyplot as plt
+import mplfinance as mpf
 
 load_dotenv()
 
@@ -29,7 +36,7 @@ TIMEFRAME = "1h"
 bot = Bot(token=TELEGRAM_TOKEN)
 
 # =========================================================================
-# === MODULE 14: DATABASE LOGGER & TRACKER ===
+# === MODULE 14: DATABASE LOGGER ===
 # =========================================================================
 
 def init_db():
@@ -72,7 +79,7 @@ def fetch_data(symbol):
         df = pd.DataFrame(data["values"])
         df['datetime'] = pd.to_datetime(df['datetime'])
         df.set_index('datetime', inplace=True)
-        df = df.iloc[::-1] # Oldest to newest
+        df = df.iloc[::-1]
         
         cols = ['open', 'high', 'low', 'close']
         df[cols] = df[cols].astype(float)
@@ -133,7 +140,6 @@ def calc_technical_data(df, bias, swing_h, swing_l):
     df['atr'] = df[['tr0', 'tr1', 'tr2']].max(axis=1).rolling(14).mean()
     
     latest = df.iloc[-1]
-    
     macd_hist = latest['MACDh_12_26_9']
     macd_confirm = (macd_hist > 0 and bias == "BULLISH") or (macd_hist < 0 and bias == "BEARISH")
     
@@ -174,7 +180,7 @@ def score_setup(struct, ob_fvg, tech):
     return {"total_score": score, "grade": grade}
 
 # =========================================================================
-# === MODULE 11 & 12: DYNAMIC TEXT & FORMATTER ===
+# === MODULE 11: DYNAMIC TEXT & FORMATTER ===
 # =========================================================================
 
 def generate_analysis_text(bias, ob_fvg, tech):
@@ -212,16 +218,59 @@ def format_telegram_message(signal):
     return msg
 
 # =========================================================================
+# === MODULE 11.5: CHART GENERATOR ===
+# =========================================================================
+
+def generate_trade_chart(df, symbol, direction, entry, sl, tp1):
+    """Generates a TradingView style chart with Risk/Reward shaded zones."""
+    plot_df = df.tail(60) # Show the last 60 candles for clarity
+
+    # Custom TradingView-style dark theme
+    mc = mpf.make_marketcolors(up='#26a69a', down='#ef5350', edge='inherit', wick='inherit', volume='in')
+    s = mpf.make_mpf_style(base_mpf_style='nightclouds', marketcolors=mc, gridcolor='#2a2a2a', facecolor='#131722', figcolor='#131722')
+
+    fig, axes = mpf.plot(
+        plot_df,
+        type='candle',
+        style=s,
+        title=f"\n{symbol} - 1H - {direction} Setup",
+        ylabel='Price',
+        returnfig=True,
+        figsize=(10, 6),
+        tight_layout=True
+    )
+
+    ax = axes[0]
+
+    # Shade the Risk (Red) and Reward (Green) Zones
+    if direction == "BUY":
+        ax.axhspan(sl, entry, alpha=0.3, color='#ef5350') 
+        ax.axhspan(entry, tp1, alpha=0.3, color='#26a69a') 
+    else:
+        ax.axhspan(entry, sl, alpha=0.3, color='#ef5350') 
+        ax.axhspan(tp1, entry, alpha=0.3, color='#26a69a')
+
+    # Add dashed lines for the exact levels
+    ax.axhline(tp1, color='#26a69a', linestyle='--', linewidth=1.5, label="TP1")
+    ax.axhline(entry, color='#fbc02d', linestyle='--', linewidth=1.5, label="Entry")
+    ax.axhline(sl, color='#ef5350', linestyle='--', linewidth=1.5, label="Stop Loss")
+
+    # Save to memory buffer instead of disk
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=100, bbox_inches='tight', facecolor='#131722')
+    buf.seek(0)
+    plt.close(fig) # Clean up memory
+    
+    return buf
+
+# =========================================================================
 # === MODULE 15: DAILY PERFORMANCE REPORT ===
 # =========================================================================
 
 async def send_daily_report():
-    """Generates and sends a 24-hour summary of all closed trades."""
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Generating 24H Performance Report...")
-    
     conn = sqlite3.connect('trading_bot.db')
     c = conn.cursor()
-    # Fetch all trades closed in the last 24 hours
     c.execute("SELECT outcome, pips_result FROM signals WHERE outcome != 'OPEN' AND outcome_timestamp >= datetime('now', '-24 hours')")
     recent_closed = c.fetchall()
     conn.close()
@@ -231,11 +280,9 @@ async def send_daily_report():
     total_trades = wins + losses
     net_pips = sum(t[1] for t in recent_closed if t[1] is not None)
     
-    if total_trades == 0:
-        return # Skip sending a report if no trades closed today
+    if total_trades == 0: return
         
     win_rate = (wins / total_trades) * 100
-    
     msg = (
         f"📅 <b>24-HOUR PERFORMANCE REPORT</b> 📅\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -250,8 +297,7 @@ async def send_daily_report():
     
     try:
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML')
-    except Exception as e:
-        print(f"Daily Report Error: {e}")
+    except Exception as e: print(f"Daily Report Error: {e}")
 
 # =========================================================================
 # === MODULE 13: ORCHESTRATOR & TRADE MONITOR ===
@@ -262,7 +308,6 @@ async def process_markets():
     for symbol in WATCHLIST:
         df = fetch_data(symbol)
         if df is None or df.empty: continue
-        
         current_price = df['close'].iloc[-1]
         
         # --- TRACKING LIVE TRADES ---
@@ -274,33 +319,20 @@ async def process_markets():
         for trade in open_trades:
             t_id, direction, entry, sl, tp1 = trade
             multiplier = 100 if "JPY" in symbol else 10 if "XAU" in symbol else 1 if "BTC" in symbol else 10000
-            
             closed = False
             result = ""
             pips = 0
             
-            # Check for Hits
             if direction == "BUY":
-                if current_price >= tp1:
-                    closed, result = True, "WIN"
-                    pips = (tp1 - entry) * multiplier
-                elif current_price <= sl:
-                    closed, result = True, "LOSS"
-                    pips = (sl - entry) * multiplier
-            else: # SELL
-                if current_price <= tp1:
-                    closed, result = True, "WIN"
-                    pips = (entry - tp1) * multiplier
-                elif current_price >= sl:
-                    closed, result = True, "LOSS"
-                    pips = (entry - sl) * multiplier
+                if current_price >= tp1: closed, result, pips = True, "WIN", (tp1 - entry) * multiplier
+                elif current_price <= sl: closed, result, pips = True, "LOSS", (sl - entry) * multiplier
+            else:
+                if current_price <= tp1: closed, result, pips = True, "WIN", (entry - tp1) * multiplier
+                elif current_price >= sl: closed, result, pips = True, "LOSS", (entry - sl) * multiplier
                     
             if closed:
-                c.execute("UPDATE signals SET outcome=?, pips_result=?, outcome_timestamp=? WHERE id=?", 
-                          (result, pips, datetime.now(timezone.utc), t_id))
+                c.execute("UPDATE signals SET outcome=?, pips_result=?, outcome_timestamp=? WHERE id=?", (result, pips, datetime.now(timezone.utc), t_id))
                 conn.commit()
-                
-                # Send immediate alert that trade closed
                 icon = "✅" if result == "WIN" else "❌"
                 close_msg = f"{icon} <b>Trade Closed: {symbol}</b>\nResult: {result} ({pips:+.1f} Pips)\n<i>By Nilesh</i>"
                 await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=close_msg, parse_mode='HTML')
@@ -309,7 +341,6 @@ async def process_markets():
         struct = analyze_structure(df)
         ob_fvg = find_ob_and_fvg(df, struct['bias'])
         tech = calc_technical_data(df, struct['bias'], struct['swing_high'], struct['swing_low'])
-        
         scoring = score_setup(struct, ob_fvg, tech)
         
         if scoring['grade'] in ["PREMIUM", "STANDARD"]:
@@ -324,43 +355,46 @@ async def process_markets():
                 risk = sl - entry_mid
                 tp1, tp2, tp3 = entry_mid - (risk * 1.5), entry_mid - (risk * 2.5), entry_mid - (risk * 4.0)
 
-            # Prevent duplicating signals within 4 hours
             c.execute("SELECT * FROM signals WHERE pair=? AND timestamp_sent >= datetime('now', '-4 hours') AND outcome='OPEN'", (symbol,))
             recent_signal = c.fetchone()
             
             if not recent_signal:
+                direction = "BUY" if struct['bias'] == "BULLISH" else "SELL"
                 dynamic_analysis = generate_analysis_text(struct['bias'], ob_fvg, tech)
+                
                 signal_data = {
-                    "pair": symbol, "direction": "BUY" if struct['bias'] == "BULLISH" else "SELL",
-                    "current_price": current_price, "entry": entry_mid, "sl": sl,
-                    "tp1": tp1, "tp2": tp2, "tp3": tp3, "score": scoring['total_score'], 
-                    "grade": scoring['grade'], "analysis": dynamic_analysis 
+                    "pair": symbol, "direction": direction, "current_price": current_price, 
+                    "entry": entry_mid, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3, 
+                    "score": scoring['total_score'], "grade": scoring['grade'], "analysis": dynamic_analysis 
                 }
 
+                # 1. Format the text
                 msg = format_telegram_message(signal_data)
+                
+                # 2. Generate the visual chart
+                chart_img = generate_trade_chart(df, symbol, direction, entry_mid, sl, tp1)
+
                 try:
-                    await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML')
+                    # 3. Send photo with text as caption
+                    await bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=chart_img, caption=msg, parse_mode='HTML')
                     log_signal(signal_data)
-                    print(f"--> Signal broadcasted for {symbol}")
+                    print(f"--> Signal and Chart broadcasted for {symbol}")
                 except Exception as e:
                     print(f"Telegram Error: {e}")
+                finally:
+                    chart_img.close() # Always close the buffer to free memory
                     
         conn.close()
         time.sleep(2) 
 
 async def main():
-    print("Initializing AI Quant Bot (1H Edition) with Performance Tracking...")
+    print("Initializing AI Quant Bot (1H Edition) with Visual Charts...")
     init_db()
-    
     scheduler = AsyncIOScheduler()
-    # Scans markets and checks open trades every 15 minutes
     scheduler.add_job(process_markets, 'interval', minutes=15)
-    # Sends daily performance report every 24 hours
     scheduler.add_job(send_daily_report, 'interval', hours=24)
     scheduler.start()
-    
     await process_markets() 
-    
     while True:
         await asyncio.sleep(1)
 
@@ -369,21 +403,17 @@ async def main():
 # =========================================================================
 
 def keep_alive():
-    """Runs a tiny web server to satisfy Render's port scanner and UptimeRobot."""
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
             self.wfile.write(b"AI Quant Bot is ONLINE and scanning markets.")
-            
         def do_HEAD(self):
             self.send_response(200)
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
-            
-        def log_message(self, format, *args):
-            pass 
+        def log_message(self, format, *args): pass 
             
     port = int(os.environ.get('PORT', 8080))
     server = HTTPServer(('0.0.0.0', port), Handler)
