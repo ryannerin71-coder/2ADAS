@@ -1,5 +1,6 @@
 import os
 import time
+import random
 import sqlite3
 import asyncio
 import requests
@@ -36,7 +37,7 @@ TIMEFRAME = "1h"
 bot = Bot(token=TELEGRAM_TOKEN)
 
 # =========================================================================
-# === MODULE 14: DATABASE LOGGER (Duplicate Guard Only) ===
+# === MODULE 14: DATABASE LOGGER (Duplicate Guard) ===
 # =========================================================================
 
 def init_db():
@@ -118,7 +119,7 @@ def find_ob_and_fvg(df, bias):
     return {"ob_high": ob_high, "ob_low": ob_low, "ob_valid": ob_valid, "ob_score": 3, "fvg_inside_ob": fvg_inside_ob}
 
 # =========================================================================
-# === MODULE 7, 8, 9: FIB, LIQUIDITY, INDICATORS ===
+# === MODULE 7, 8, 9: INDICATORS ===
 # =========================================================================
 
 def calc_technical_data(df, bias, swing_h, swing_l):
@@ -173,7 +174,7 @@ def score_setup(struct, ob_fvg, tech):
     return {"total_score": score, "grade": grade}
 
 # =========================================================================
-# === MODULE 11: DYNAMIC TEXT & FORMATTER ===
+# === MODULE 11: TEXT & FORMATTER ===
 # =========================================================================
 
 def generate_analysis_text(bias, ob_fvg, tech):
@@ -252,6 +253,60 @@ def generate_trade_chart(df, symbol, direction, entry, sl, tp1):
     return buf
 
 # =========================================================================
+# === MODULE 16: COMMUNITY MANAGER (ADMIN FEATURES) ===
+# =========================================================================
+
+async def send_admin_message(text):
+    try:
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode='HTML')
+    except Exception as e:
+        print(f"Admin Msg Error: {e}")
+
+async def session_london():
+    msg = "🌍 <b>London Session Open!</b>\nLiquidity is entering the market. The AI is scanning for premium setups. Stick to your risk management rules today.\n<i>— Admin Nilesh</i>"
+    await send_admin_message(msg)
+
+async def session_ny():
+    msg = "🗽 <b>New York Session Open!</b>\nWe are entering the NY/London overlap. Expect high volatility and major market moves. Ensure stops are in place.\n<i>— Admin Nilesh</i>"
+    await send_admin_message(msg)
+
+async def weekend_close():
+    msg = "🛑 <b>Markets are closing!</b>\nThe AI scanner is resting for the weekend. Review your trades, step away from the charts, and enjoy your weekend!\n<i>— Admin Nilesh</i>"
+    await send_admin_message(msg)
+
+async def weekend_open():
+    msg = "🌅 <b>Markets are open!</b>\nWelcome back. The Asian session is live and the AI scanner is back online hunting for setups.\n<i>— Admin Nilesh</i>"
+    await send_admin_message(msg)
+
+async def daily_psychology():
+    tips = [
+        "A lost trade is just a business expense. Never risk more than 1% of your account on a single signal.",
+        "Patience pays. If the bot isn't firing signals, it means the market is choppy. Cash is a valid position.",
+        "Trading is 20% strategy and 80% psychology. Don't revenge trade if you hit a stop loss.",
+        "Protect your capital at all costs. Move your Stop Loss to entry as soon as TP1 is hit.",
+        "Consistency is the holy grail. Follow the system, ignore the noise, and trust the mathematical edge."
+    ]
+    msg = f"💡 <b>Daily Trading Tip:</b>\n{random.choice(tips)}\n<i>— Admin Nilesh</i>"
+    await send_admin_message(msg)
+
+async def market_pulse():
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Generating Market Pulse...")
+    pulse_text = "📊 <b>Mid-Day Market Pulse</b> 📊\n<i>Current 1H Trend Status:</i>\n\n"
+    
+    for symbol in WATCHLIST:
+        df = fetch_data(symbol)
+        if df is not None and not df.empty:
+            struct = analyze_structure(df)
+            trend_icon = "🟢 Bullish" if struct['bias'] == "BULLISH" else "🔴 Bearish"
+            if not struct['trend_aligned']:
+                trend_icon = "⚪ Choppy/Ranging"
+            pulse_text += f"• <b>{symbol}:</b> {trend_icon}\n"
+        time.sleep(1) # Pacing
+        
+    pulse_text += "\n<i>The AI will only fire signals on clean setups.</i>\n<i>— Admin Nilesh</i>"
+    await send_admin_message(pulse_text)
+
+# =========================================================================
 # === MODULE 13: ORCHESTRATOR ===
 # =========================================================================
 
@@ -262,7 +317,6 @@ async def process_markets():
         if df is None or df.empty: continue
         current_price = df['close'].iloc[-1]
                 
-        # --- SCANNING FOR NEW SETUPS ---
         struct = analyze_structure(df)
         ob_fvg = find_ob_and_fvg(df, struct['bias'])
         tech = calc_technical_data(df, struct['bias'], struct['swing_high'], struct['swing_low'])
@@ -280,7 +334,6 @@ async def process_markets():
                 risk = sl - entry_mid
                 tp1, tp2, tp3 = entry_mid - (risk * 1.5), entry_mid - (risk * 2.5), entry_mid - (risk * 4.0)
 
-            # Prevent duplicate signals within 4 hours
             conn = sqlite3.connect('trading_bot.db')
             c = conn.cursor()
             c.execute("SELECT * FROM signals WHERE pair=? AND timestamp_sent >= datetime('now', '-4 hours')", (symbol,))
@@ -312,12 +365,25 @@ async def process_markets():
         time.sleep(2) 
 
 async def main():
-    print("Initializing AI Quant Bot (1H Edition) with Visual Charts...")
+    print("Initializing AI Quant Bot (1H Edition) with Community Manager...")
     init_db()
-    scheduler = AsyncIOScheduler()
+    
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    
+    # Core Trading Scanner (Every 15 mins)
     scheduler.add_job(process_markets, 'interval', minutes=15)
+    
+    # Community Manager Schedule (Using UTC standard Forex hours)
+    scheduler.add_job(session_london, 'cron', day_of_week='mon-fri', hour=7, minute=0)
+    scheduler.add_job(market_pulse, 'cron', day_of_week='mon-fri', hour=12, minute=0)
+    scheduler.add_job(session_ny, 'cron', day_of_week='mon-fri', hour=13, minute=0)
+    scheduler.add_job(daily_psychology, 'cron', day_of_week='mon-fri', hour=16, minute=0)
+    scheduler.add_job(weekend_close, 'cron', day_of_week='fri', hour=21, minute=0)
+    scheduler.add_job(weekend_open, 'cron', day_of_week='sun', hour=21, minute=0)
+
     scheduler.start()
     await process_markets() 
+    
     while True:
         await asyncio.sleep(1)
 
